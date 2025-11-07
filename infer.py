@@ -69,11 +69,6 @@ def load_video_frames(
     return frames, h, w
 
 
-def _round_to_multiple_of_16(value: int) -> int:
-    base = 16
-    return max(base, (value // base) * base)
-
-
 def save_side_by_side(input_frames: List[Image.Image], output_frames: List[Image.Image], out_path: str, fps: int) -> None:
     t = min(len(input_frames), len(output_frames))
     if t == 0:
@@ -164,19 +159,17 @@ def main():
             print(f"[GPU {rank}] Missing prompt for {fname}; skipping")
             continue
 
-        target_size = (args.width, args.height) if args.width is not None and args.height is not None else None
-        frames, height, width = load_video_frames(video_path, args.source_frames, target_size)
-        # Enforce multiples of 16 for H/W (common VAE/DiT grid requirement)
-        adj_w = _round_to_multiple_of_16(width)
-        adj_h = _round_to_multiple_of_16(height)
-        if (adj_w, adj_h) != (width, height):
-            frames = [im.resize((adj_w, adj_h), resample=Image.BICUBIC) for im in frames]
-            width, height = adj_w, adj_h
-        # Lucy-Edit expects num_frames to match the input frames count
-        if args.num_frames is not None and args.num_frames != len(frames):
-            print(f"[GPU {rank}] Note: overriding --num_frames={args.num_frames} to len(video)={len(frames)} for Lucy-Edit")
+        # Load first to get orientation, then resize to fixed targets:
+        # landscape -> HxW 480x832; portrait -> HxW 832x480
+        frames, height, width = load_video_frames(video_path, args.source_frames, None)
+        if width >= height:
+            target_w, target_h = 832, 480
+        else:
+            target_w, target_h = 480, 832
+        if (width, height) != (target_w, target_h):
+            frames = [im.resize((target_w, target_h), resample=Image.BICUBIC) for im in frames]
+            width, height = target_w, target_h
         num_frames = len(frames)
-        print(f"[GPU {rank}] frames={len(frames)}, HxW={height}x{width}")
 
         with torch.no_grad():
             result = pipe(
