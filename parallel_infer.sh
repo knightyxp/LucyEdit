@@ -1,4 +1,4 @@
-torchrun --nproc_per_node=4 examples/wan2.1/predict_v2v_json_new.py \
+torchrun --nproc_per_node=4 infer.py \
   --test_json /scratch3/yan204/yxp/VideoX_Fun/data/test_json/4tasks_rem_add_swap_local-style_test.json \
   --output_dir lucy_edit_results\
   --seed 0 \
