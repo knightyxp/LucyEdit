@@ -185,8 +185,8 @@ def main():
     print(f"[GPU {rank}] Processing {len(subset_items)} items")
 
     weight_dtype = torch.bfloat16
-    vae = AutoencoderKLWan.from_pretrained(args.model_id, subfolder="vae", dtype=torch.float32)
-    pipe = LucyEditPipeline.from_pretrained(args.model_id, vae=vae, dtype=weight_dtype)
+    vae = AutoencoderKLWan.from_pretrained(args.model_id, subfolder="vae", torch_dtype=torch.float32)
+    pipe = LucyEditPipeline.from_pretrained(args.model_id, vae=vae, torch_dtype=weight_dtype)
     pipe.to(f"cuda:{rank}")
 
     generator = torch.Generator(device=f"cuda:{rank}").manual_seed(args.seed + rank)
