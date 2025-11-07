@@ -141,7 +141,8 @@ def save_side_by_side(input_frames: List[Image.Image], output_frames: List[Image
         out_arr = np.stack(resized, axis=0)
 
     combined = np.concatenate([in_arr, out_arr], axis=2)
-    export_to_video(combined, out_path, fps=fps)
+    frames_pil = [Image.fromarray(combined[i]) for i in range(combined.shape[0])]
+    export_to_video(frames_pil, out_path, fps=fps)
 
 
 def main():
