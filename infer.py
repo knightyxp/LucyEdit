@@ -14,6 +14,10 @@ from diffusers import AutoencoderKLWan, LucyEditPipeline
 from diffusers.utils import export_to_video, load_video
 
 
+# Silence HF tokenizers fork-parallelism warning in torchrun
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Lucy-Edit: JSON-driven parallel inference")
     parser.add_argument("--test_json", type=str, required=True, help="Path to test JSON file")
@@ -71,39 +75,72 @@ def load_video_frames(
 
 
 def save_side_by_side(input_frames: List[Image.Image], output_frames: List[Image.Image], out_path: str, fps: int) -> None:
-    # Normalize output to List[PIL.Image]
-    def to_pil_list(frames_any):
+    def to_uint8(arr: np.ndarray) -> np.ndarray:
+        if arr.dtype == np.uint8:
+            return arr
+        if np.issubdtype(arr.dtype, np.floating):
+            # Assume [0,1] floats; clip and scale
+            arr = np.clip(arr, 0.0, 1.0) * 255.0
+            return arr.astype(np.uint8)
+        return arr.astype(np.uint8)
+
+    def frames_to_array(frames_any) -> np.ndarray:
+        # Returns array in shape (T, H, W, C) uint8
         if isinstance(frames_any, list):
             if len(frames_any) == 0:
-                return []
+                return np.zeros((0, 1, 1, 3), dtype=np.uint8)
             if isinstance(frames_any[0], Image.Image):
-                return frames_any
-            # list of np arrays
-            return [Image.fromarray(np.asarray(f)) for f in frames_any]
-        # numpy array of shape [T, H, W, C]
-        if isinstance(frames_any, np.ndarray) and frames_any.ndim == 4:
-            return [Image.fromarray(frames_any[i]) for i in range(frames_any.shape[0])]
-        return frames_any
+                arr = np.stack([np.asarray(f.convert("RGB")) for f in frames_any], axis=0)
+                return to_uint8(arr)
+            # list of arrays
+            arrs = []
+            for f in frames_any:
+                a = np.asarray(f)
+                if a.ndim == 3 and a.shape[0] in (1, 3, 4) and a.shape[-1] not in (1, 3, 4):
+                    a = a.transpose(1, 2, 0)
+                arrs.append(a)
+            arr = np.stack(arrs, axis=0)
+            if arr.shape[-1] == 1:
+                arr = np.repeat(arr, 3, axis=-1)
+            return to_uint8(arr)
+        # ndarray inputs
+        arr = np.asarray(frames_any)
+        if arr.ndim == 5:
+            # (B, T, H, W, C)
+            arr = arr[0]
+        elif arr.ndim == 4:
+            # Either (T, H, W, C) or (T, C, H, W)
+            if arr.shape[-1] not in (1, 3, 4) and arr.shape[1] in (1, 3, 4):
+                arr = arr.transpose(0, 2, 3, 1)
+        elif arr.ndim == 3:
+            # (H, W, C)
+            arr = arr[np.newaxis, ...]
+        if arr.shape[-1] == 1:
+            arr = np.repeat(arr, 3, axis=-1)
+        return to_uint8(arr)
 
-    input_pil = input_frames if (len(input_frames) == 0 or isinstance(input_frames[0], Image.Image)) else [Image.fromarray(np.asarray(f)) for f in input_frames]
-    output_pil = to_pil_list(output_frames)
+    in_arr = frames_to_array(input_frames)
+    out_arr = frames_to_array(output_frames)
 
-    t = min(len(input_pil), len(output_pil))
-    if t == 0:
+    if in_arr.shape[0] == 0 or out_arr.shape[0] == 0:
         return
-    iw, ih = input_pil[0].size
-    ow, oh = output_pil[0].size
-    if (ow, oh) != (iw, ih):
-        out_resized = [im.resize((iw, ih), resample=Image.BICUBIC) for im in output_pil[:t]]
-    else:
-        out_resized = output_pil[:t]
-    in_crop = input_pil[:t]
-    combined: List[Image.Image] = []
-    for a, b in zip(in_crop, out_resized):
-        canvas = Image.new("RGB", (iw + iw, ih))
-        canvas.paste(a, (0, 0))
-        canvas.paste(b, (iw, 0))
-        combined.append(canvas)
+
+    T = min(in_arr.shape[0], out_arr.shape[0])
+    in_arr = in_arr[:T]
+    out_arr = out_arr[:T]
+
+    # Ensure same spatial size (should already match given we pass height/width to pipeline)
+    if in_arr.shape[1:3] != out_arr.shape[1:3]:
+        # Resize out_arr to match in_arr using PIL
+        H, W = in_arr.shape[1], in_arr.shape[2]
+        resized = []
+        for i in range(out_arr.shape[0]):
+            im = Image.fromarray(out_arr[i])
+            im = im.resize((W, H), resample=Image.BICUBIC)
+            resized.append(np.asarray(im))
+        out_arr = np.stack(resized, axis=0)
+
+    combined = np.concatenate([in_arr, out_arr], axis=2)
     export_to_video(combined, out_path, fps=fps)
 
 
@@ -148,8 +185,8 @@ def main():
     print(f"[GPU {rank}] Processing {len(subset_items)} items")
 
     weight_dtype = torch.bfloat16
-    vae = AutoencoderKLWan.from_pretrained(args.model_id, subfolder="vae", torch_dtype=torch.float32)
-    pipe = LucyEditPipeline.from_pretrained(args.model_id, vae=vae, torch_dtype=weight_dtype)
+    vae = AutoencoderKLWan.from_pretrained(args.model_id, subfolder="vae", dtype=torch.float32)
+    pipe = LucyEditPipeline.from_pretrained(args.model_id, vae=vae, dtype=weight_dtype)
     pipe.to(f"cuda:{rank}")
 
     generator = torch.Generator(device=f"cuda:{rank}").manual_seed(args.seed + rank)
