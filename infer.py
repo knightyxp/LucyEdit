@@ -4,6 +4,7 @@ import os
 import json
 import argparse
 import shutil
+import numpy as np
 
 import torch
 import torch.distributed as dist
@@ -70,16 +71,33 @@ def load_video_frames(
 
 
 def save_side_by_side(input_frames: List[Image.Image], output_frames: List[Image.Image], out_path: str, fps: int) -> None:
-    t = min(len(input_frames), len(output_frames))
+    # Normalize output to List[PIL.Image]
+    def to_pil_list(frames_any):
+        if isinstance(frames_any, list):
+            if len(frames_any) == 0:
+                return []
+            if isinstance(frames_any[0], Image.Image):
+                return frames_any
+            # list of np arrays
+            return [Image.fromarray(np.asarray(f)) for f in frames_any]
+        # numpy array of shape [T, H, W, C]
+        if isinstance(frames_any, np.ndarray) and frames_any.ndim == 4:
+            return [Image.fromarray(frames_any[i]) for i in range(frames_any.shape[0])]
+        return frames_any
+
+    input_pil = input_frames if (len(input_frames) == 0 or isinstance(input_frames[0], Image.Image)) else [Image.fromarray(np.asarray(f)) for f in input_frames]
+    output_pil = to_pil_list(output_frames)
+
+    t = min(len(input_pil), len(output_pil))
     if t == 0:
         return
-    iw, ih = input_frames[0].size
-    ow, oh = output_frames[0].size
+    iw, ih = input_pil[0].size
+    ow, oh = output_pil[0].size
     if (ow, oh) != (iw, ih):
-        out_resized = [im.resize((iw, ih), resample=Image.BICUBIC) for im in output_frames[:t]]
+        out_resized = [im.resize((iw, ih), resample=Image.BICUBIC) for im in output_pil[:t]]
     else:
-        out_resized = output_frames[:t]
-    in_crop = input_frames[:t]
+        out_resized = output_pil[:t]
+    in_crop = input_pil[:t]
     combined: List[Image.Image] = []
     for a, b in zip(in_crop, out_resized):
         canvas = Image.new("RGB", (iw + iw, ih))
@@ -201,6 +219,10 @@ def main():
         print(f"[GPU {rank}] Completed {fname}")
 
     print(f"[GPU {rank}] Finished processing all assigned items")
+    try:
+        dist.destroy_process_group()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
